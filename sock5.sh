@@ -1,9 +1,14 @@
 #!/bin/bash
 
-# sing-box socks5 安装脚本 (支持多下载源)
-# 用法：PORT=16805 USERNAME=user PASSWORD=pass bash sock5.sh
+# sing-box socks5 安装/卸载脚本 (支持 IPv4/IPv6 双栈)
+# 用法：
+# 安装：
+#   PORT=16805 USERNAME=oneforall PASSWORD=allforone bash <(curl -Ls https://raw.githubusercontent.com/jyucoeng/socks5/main/sock5.sh)
+#   说明：监听 0.0.0.0 以确保 IPv4/IPv6 双栈兼容
+# 卸载：
+#   bash <(curl -Ls https://raw.githubusercontent.com/jyucoeng/socks5/main/sock5.sh) uninstall
 
-set -e
+set -euo pipefail
 
 INSTALL_DIR="/usr/local/sb"
 CONFIG_FILE="$INSTALL_DIR/config.json"
@@ -11,160 +16,96 @@ BIN_FILE="$INSTALL_DIR/sing-box"
 LOG_FILE="$INSTALL_DIR/run.log"
 PID_FILE="$INSTALL_DIR/sb.pid"
 
-SING_BOX_VERSION="1.10.7"
-
 # ===== 卸载逻辑 =====
 if [[ "${1:-}" == "uninstall" ]]; then
   echo "[INFO] 停止 socks5 服务..."
   pkill -f "sing-box run" || true
-  [[ -f "$PID_FILE" ]] && kill "$(cat "$PID_FILE")" 2>/dev/null || true
+  if [[ -f "$PID_FILE" ]]; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null || true
+    rm -f "$PID_FILE"
+  fi
+  echo "[INFO] 删除安装目录 $INSTALL_DIR"
   rm -rf "$INSTALL_DIR"
-  echo "✅ socks5 卸载完成"
+  echo "✅ socks5 卸载完成。"
   exit 0
 fi
 
 # ===== 环境变量检查 =====
 if [[ -z "${PORT:-}" || -z "${USERNAME:-}" || -z "${PASSWORD:-}" ]]; then
-  echo "[ERROR] 必须设置 PORT、USERNAME、PASSWORD"
-  echo "示例: PORT=16805 USERNAME=user PASSWORD=pass bash $0"
+  echo "[ERROR] 必须设置 PORT、USERNAME、PASSWORD 变量，例如："
+  echo "PORT=16805 USERNAME=oneforall PASSWORD=allforone bash <(curl -Ls https://raw.githubusercontent.com/jyucoeng/socks5/main/sock5.sh)"
   exit 1
 fi
 
-echo "========================================="
-echo " Socks5 代理安装程序"
-echo "========================================="
-echo "[INFO] 端口: $PORT | 用户名: $USERNAME"
-echo ""
-
-# ===== 检测网络 =====
-echo "[1/7] 检测网络环境..."
-IP_V6=$(timeout 3 curl -s6 icanhazip.com 2>/dev/null || echo "")
-if [[ -n "$IP_V6" ]]; then
-  echo "✓ IPv6: $IP_V6"
-else
-  echo "✓ IPv4 模式"
+# ===== 检测 LXC/Docker 容器环境 =====
+if grep -qaE 'lxc|docker' /proc/1/environ 2>/dev/null || grep -qaE 'lxc' /proc/1/cgroup 2>/dev/null; then
+  echo "[WARN] 检测到可能运行在 LXC/Docker 容器中，请确保容器网络配置允许外部访问端口 $PORT"
 fi
+
+# ===== 获取公网 IP =====
+echo "[INFO] 获取公网 IP..."
+IP_V4=$(curl -s4 ipv4.ip.sb || curl -s4 ifconfig.me || echo "127.0.0.1")
+IP_V6=$(curl -s6 ipv6.ip.sb || echo "::1")
+echo "[INFO] 公网 IPv4: $IP_V4, IPv6: $IP_V6"
 
 # ===== 安装依赖 =====
-echo ""
-echo "[2/7] 安装依赖..."
-if command -v apt >/dev/null 2>&1; then
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq >/dev/null 2>&1 || true
-  apt-get install -y -qq curl tar file iproute2 >/dev/null 2>&1 || true
+echo "[INFO] 安装依赖 curl tar unzip file grep ..."
+if command -v apk >/dev/null 2>&1; then
+  apk update
+  apk add --no-cache curl tar unzip file grep
+elif command -v apt >/dev/null 2>&1; then
+  apt update
+  apt install -y curl tar unzip file grep net-tools iproute2
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y curl tar unzip file grep net-tools iproute
+else
+  echo "[WARN] 未检测到已知包管理器，请确保 curl tar unzip file grep 已安装"
 fi
-echo "✓ 依赖准备完成"
 
-# ===== 准备目录 =====
-echo ""
-echo "[3/7] 准备安装目录..."
+# ===== 下载 sing-box =====
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR" || exit 1
 
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64) ARCH_TYPE=amd64 ;;
-  aarch64|arm64) ARCH_TYPE=arm64 ;;
+  aarch64 | arm64) ARCH_TYPE=arm64 ;;
   *) echo "[ERROR] 不支持的架构: $ARCH"; exit 1 ;;
 esac
-echo "✓ 架构: $ARCH_TYPE"
 
-# ===== 下载 sing-box =====
-echo ""
-echo "[4/7] 下载 sing-box v${SING_BOX_VERSION}..."
-
-rm -f sb.tar.gz sing-box
-
-FILENAME="sing-box-${SING_BOX_VERSION}-linux-${ARCH_TYPE}.tar.gz"
-
-# 多个下载源
-SOURCES=(
-  "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${FILENAME}"
-  "https://gh.ddlc.top/https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${FILENAME}"
-  "https://ghproxy.com/https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${FILENAME}"
-  "https://mirror.ghproxy.com/https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${FILENAME}"
-  "https://gh-proxy.com/https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${FILENAME}"
-)
-
-DOWNLOAD_SUCCESS=false
-
-for SOURCE in "${SOURCES[@]}"; do
-  echo "尝试: $SOURCE"
-  
-  # 尝试下载（15秒超时）
-  if curl -L --connect-timeout 5 --max-time 30 -# -o sb.tar.gz "$SOURCE" 2>&1; then
-    # 检查文件大小
-    if [[ -f sb.tar.gz ]]; then
-      FILE_SIZE=$(stat -c%s sb.tar.gz 2>/dev/null || stat -f%z sb.tar.gz 2>/dev/null || echo "0")
-      if [[ "$FILE_SIZE" -gt 500000 ]]; then
-        echo "✓ 下载成功 ($(( FILE_SIZE / 1048576 ))MB)"
-        DOWNLOAD_SUCCESS=true
-        break
-      else
-        echo "✗ 文件太小，尝试下一个源..."
-        rm -f sb.tar.gz
-      fi
-    fi
-  else
-    echo "✗ 连接失败，尝试下一个源..."
-  fi
-  
-  sleep 1
-done
-
-if [[ "$DOWNLOAD_SUCCESS" != true ]]; then
-  echo ""
-  echo "❌ 所有下载源均失败"
-  echo ""
-  echo "可能原因："
-  echo "1. 服务器无法访问外网"
-  echo "2. 防火墙阻止了 HTTPS 连接"
-  echo "3. DNS 解析问题"
-  echo ""
-  echo "请尝试手动下载："
-  echo "1. 访问 https://github.com/SagerNet/sing-box/releases"
-  echo "2. 下载 $FILENAME"
-  echo "3. 上传到服务器 $INSTALL_DIR 目录"
-  echo "4. 运行: cd $INSTALL_DIR && tar -xzf $FILENAME --strip-components=1"
+SB_VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name"' | head -n1 | cut -d '"' -f4)
+if [[ -z "$SB_VER" ]]; then
+  echo "[ERROR] 获取 sing-box 版本失败，可能是网络问题。"
   exit 1
 fi
 
-# ===== 解压安装 =====
-echo ""
-echo "[5/7] 解压安装..."
-tar -xzf sb.tar.gz --strip-components=1 || {
-  echo "[ERROR] 解压失败"
-  exit 1
-}
+VERS="${SB_VER#v}"
+URL="https://github.com/SagerNet/sing-box/releases/download/${SB_VER}/sing-box-${VERS}-linux-${ARCH_TYPE}.tar.gz"
 
-if [[ ! -f sing-box ]]; then
-  echo "[ERROR] 未找到 sing-box 文件"
+echo "[INFO] 下载 sing-box: $URL"
+curl -L --retry 3 --retry-delay 2 -o sb.tar.gz "$URL"
+
+if ! file sb.tar.gz | grep -q 'gzip compressed'; then
+  echo "❌ 下载失败，文件不是有效的 gzip 格式。内容如下："
+  head -n 10 sb.tar.gz
   exit 1
 fi
 
+tar -xzf sb.tar.gz --strip-components=1
 chmod +x sing-box
 rm -f sb.tar.gz
-echo "✓ 安装完成"
 
-# ===== 生成配置 =====
-echo ""
-echo "[6/7] 生成配置..."
-
-# IPv6 环境监听 ::，否则监听 0.0.0.0
-LISTEN_ADDR="::"
-[[ -z "$IP_V6" ]] && LISTEN_ADDR="0.0.0.0"
-
+# ===== 生成配置文件 =====
 cat > "$CONFIG_FILE" <<EOF
 {
   "log": {
-    "level": "info",
-    "timestamp": true
+    "level": "info"
   },
   "inbounds": [
     {
       "type": "socks",
       "tag": "socks-in",
-      "listen": "$LISTEN_ADDR",
+      "listen": "0.0.0.0",
       "listen_port": $PORT,
       "users": [{
         "username": "$USERNAME",
@@ -174,105 +115,80 @@ cat > "$CONFIG_FILE" <<EOF
   ],
   "outbounds": [
     {
-      "type": "direct",
-      "tag": "direct"
+      "type": "direct"
     }
   ]
 }
 EOF
 
-echo "✓ 配置文件生成完成"
-
 # ===== 启动服务 =====
-echo ""
-echo "[7/7] 启动服务..."
-
-pkill -f "sing-box run" 2>/dev/null || true
-sleep 1
-
+echo "[INFO] 启动 socks5 服务..."
 nohup "$BIN_FILE" run -c "$CONFIG_FILE" > "$LOG_FILE" 2>&1 &
-SING_PID=$!
-echo $SING_PID > "$PID_FILE"
+echo $! > "$PID_FILE"
 
-echo "✓ 服务已启动 (PID: $SING_PID)"
-sleep 3
+sleep 4
 
-# 检查进程
-if ! ps -p $SING_PID > /dev/null 2>&1; then
-  echo ""
-  echo "❌ 服务启动失败"
-  echo ""
-  cat "$LOG_FILE" 2>/dev/null || echo "无法读取日志"
-  exit 1
+# ===== 检查端口监听 =====
+echo "[INFO] 检查端口监听状态..."
+
+if command -v ss >/dev/null 2>&1; then
+  LISTEN_INFO=$(ss -tnlp | grep ":$PORT" || true)
+elif command -v netstat >/dev/null 2>&1; then
+  LISTEN_INFO=$(netstat -tnlp | grep ":$PORT" || true)
+else
+  LISTEN_INFO=""
 fi
 
-# 检查端口
-LISTEN_OK=false
-for i in {1..6}; do
-  if ss -tlnp 2>/dev/null | grep -q ":$PORT" || netstat -tlnp 2>/dev/null | grep -q ":$PORT"; then
-    LISTEN_OK=true
-    break
-  fi
-  sleep 1
-done
-
-if [[ "$LISTEN_OK" != true ]]; then
-  echo ""
-  echo "❌ 端口 $PORT 未能监听"
-  echo ""
+if [[ -z "$LISTEN_INFO" ]]; then
+  echo "❌ 端口 $PORT 没有监听，请查看日志：$LOG_FILE"
   tail -n 20 "$LOG_FILE"
   exit 1
 fi
 
-echo "✓ 端口 $PORT 监听正常"
+echo "[INFO] 端口监听信息："
+echo "$LISTEN_INFO"
 
-# 测试代理
-echo ""
-echo "测试代理..."
-if [[ -n "$IP_V6" ]]; then
-  if timeout 5 curl -s6 --socks5 "[::1]:$PORT" -U "$USERNAME:$PASSWORD" http://ip.sb >/dev/null 2>&1; then
-    echo "✅ 代理测试成功"
-  else
-    echo "⚠️ 本地测试失败（但服务已启动）"
-  fi
+# ===== 本地连接测试 =====
+echo "[INFO] 测试本地 socks5 代理连接..."
+
+# 测试 IPv4 连接
+if curl -s --socks5-hostname "127.0.0.1:$PORT" -U "$USERNAME:$PASSWORD" http://ip.sb >/dev/null 2>&1; then
+  echo "✅ 本地 IPv4 代理连接测试成功"
 else
-  if timeout 5 curl -s --socks5 "127.0.0.1:$PORT" -U "$USERNAME:$PASSWORD" http://ip.sb >/dev/null 2>&1; then
-    echo "✅ 代理测试成功"
-  else
-    echo "⚠️ 本地测试失败（但服务已启动）"
-  fi
+  echo "❌ 本地 IPv4 代理连接测试失败，请检查 sing-box 配置和日志"
+  tail -n 20 "$LOG_FILE"
+  exit 1
 fi
 
-# ===== 输出信息 =====
-echo ""
-echo "========================================="
-echo "✅ 安装完成！"
-echo "========================================="
-echo ""
-
-if [[ -n "$IP_V6" ]]; then
-  echo "📡 连接信息 (IPv6):"
-  echo "   socks5://$USERNAME:$PASSWORD@[$IP_V6]:$PORT"
+# 测试 IPv6 连接（如果支持）
+if [[ "$IP_V6" != "::1" ]]; then
+  if curl -s --socks5-hostname "[::1]:$PORT" -U "$USERNAME:$PASSWORD" http://ip.sb >/dev/null 2>&1; then
+    echo "✅ 本地 IPv6 代理连接测试成功"
+  else
+    echo "⚠️ 本地 IPv6 代理连接测试失败，但 IPv4 正常工作"
+  fi
 else
-  echo "📡 连接信息:"
-  echo "   socks5://$USERNAME:$PASSWORD@<服务器IP>:$PORT"
+  echo "⚠️ 系统不支持 IPv6，仅启用 IPv4 代理"
 fi
 
-echo ""
-echo "📝 配置:"
-echo "   端口: $PORT"
-echo "   用户: $USERNAME"
-echo "   密码: $PASSWORD"
-echo ""
-echo "💡 管理:"
-echo "   日志: tail -f $LOG_FILE"
-echo "   状态: ps aux | grep sing-box"
-echo "   停止: kill \$(cat $PID_FILE)"
-echo "   卸载: bash $0 uninstall"
-echo ""
-echo "⚠️ 确保防火墙已开放端口 $PORT"
-[[ -n "$IP_V6" ]] && echo "   ip6tables -I INPUT -p tcp --dport $PORT -j ACCEPT"
-echo ""
-echo "========================================="
+# ===== 防火墙提示 =====
+echo
+echo "⚠️ 请确保服务器防火墙或云安全组已开放端口 $PORT 的 TCP 入站规则。"
+echo "示例（iptables 放行端口命令）："
+echo "iptables -I INPUT -p tcp --dport $PORT -j ACCEPT"
+echo "ip6tables -I INPUT -p tcp --dport $PORT -j ACCEPT"
+echo
+
+# ===== 输出连接信息 =====
+echo "✅ Socks5 启动成功："
+echo "socks5://$USERNAME:$PASSWORD@$IP_V4:$PORT (IPv4)"
+if [[ "$IP_V6" != "::1" ]]; then
+  echo "socks5://$USERNAME:$PASSWORD@[$IP_V6]:$PORT (IPv6)"
+fi
+echo
+echo "💡 使用说明："
+echo "  - 监听地址: 0.0.0.0:$PORT (支持 IPv4/IPv6 双栈)"
+echo "  - 用户名: $USERNAME"
+echo "  - 密码: $PASSWORD"
 
 exit 0
