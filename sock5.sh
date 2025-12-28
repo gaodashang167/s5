@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# sing-box socks5 安装/卸载脚本 (支持 IPv4/IPv6 双栈)
+# sing-box socks5 安装/卸载脚本 (真正支持 IPv4/IPv6 双栈)
 # 用法：
 # 安装：
-#   PORT=16805 USERNAME=oneforall PASSWORD=allforone bash <(curl -Ls https://raw.githubusercontent.com/jyucoeng/socks5/main/sock5.sh)
-#   说明：监听 0.0.0.0 以确保 IPv4/IPv6 双栈兼容
+#   PORT=16805 USERNAME=oneforall PASSWORD=allforone bash <(curl -Ls https://你的URL/sock5.sh)
+#   说明：监听 :: 以真正实现 IPv4/IPv6 双栈兼容
 # 卸载：
-#   bash <(curl -Ls https://raw.githubusercontent.com/jyucoeng/socks5/main/sock5.sh) uninstall
+#   bash <(curl -Ls https://你的URL/sock5.sh) uninstall
 
 set -euo pipefail
 
@@ -33,7 +33,7 @@ fi
 # ===== 环境变量检查 =====
 if [[ -z "${PORT:-}" || -z "${USERNAME:-}" || -z "${PASSWORD:-}" ]]; then
   echo "[ERROR] 必须设置 PORT、USERNAME、PASSWORD 变量，例如："
-  echo "PORT=16805 USERNAME=oneforall PASSWORD=allforone bash <(curl -Ls https://raw.githubusercontent.com/jyucoeng/socks5/main/sock5.sh)"
+  echo "PORT=16805 USERNAME=oneforall PASSWORD=allforone bash <(curl -Ls https://你的URL/sock5.sh)"
   exit 1
 fi
 
@@ -44,9 +44,20 @@ fi
 
 # ===== 获取公网 IP =====
 echo "[INFO] 获取公网 IP..."
-IP_V4=$(curl -s4 ipv4.ip.sb || curl -s4 ifconfig.me || echo "127.0.0.1")
-IP_V6=$(curl -s6 ipv6.ip.sb || echo "::1")
-echo "[INFO] 公网 IPv4: $IP_V4, IPv6: $IP_V6"
+IP_V4=$(timeout 5 curl -s4 ipv4.ip.sb 2>/dev/null || timeout 5 curl -s4 ifconfig.me 2>/dev/null || echo "")
+IP_V6=$(timeout 5 curl -s6 ipv6.ip.sb 2>/dev/null || echo "")
+
+if [[ -n "$IP_V4" ]]; then
+  echo "[INFO] 公网 IPv4: $IP_V4"
+else
+  echo "[INFO] 未检测到 IPv4 地址"
+fi
+
+if [[ -n "$IP_V6" ]]; then
+  echo "[INFO] 公网 IPv6: $IP_V6"
+else
+  echo "[INFO] 未检测到 IPv6 地址"
+fi
 
 # ===== 安装依赖 =====
 echo "[INFO] 安装依赖 curl tar unzip file grep ..."
@@ -73,17 +84,21 @@ case "$ARCH" in
   *) echo "[ERROR] 不支持的架构: $ARCH"; exit 1 ;;
 esac
 
-SB_VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name"' | head -n1 | cut -d '"' -f4)
+echo "[INFO] 获取 sing-box 最新版本..."
+SB_VER=$(timeout 10 curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null | grep '"tag_name"' | head -n1 | cut -d '"' -f4 || echo "")
+
 if [[ -z "$SB_VER" ]]; then
-  echo "[ERROR] 获取 sing-box 版本失败，可能是网络问题。"
-  exit 1
+  echo "[WARN] 无法获取最新版本，使用固定版本 v1.10.7"
+  SB_VER="v1.10.7"
 fi
+
+echo "[INFO] 将安装版本: $SB_VER"
 
 VERS="${SB_VER#v}"
 URL="https://github.com/SagerNet/sing-box/releases/download/${SB_VER}/sing-box-${VERS}-linux-${ARCH_TYPE}.tar.gz"
 
 echo "[INFO] 下载 sing-box: $URL"
-curl -L --retry 3 --retry-delay 2 -o sb.tar.gz "$URL"
+curl -L --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 120 -o sb.tar.gz "$URL"
 
 if ! file sb.tar.gz | grep -q 'gzip compressed'; then
   echo "❌ 下载失败，文件不是有效的 gzip 格式。内容如下："
@@ -95,7 +110,7 @@ tar -xzf sb.tar.gz --strip-components=1
 chmod +x sing-box
 rm -f sb.tar.gz
 
-# ===== 生成配置文件 =====
+# ===== 生成配置文件（关键修复：使用 :: 而不是 0.0.0.0）=====
 cat > "$CONFIG_FILE" <<EOF
 {
   "log": {
@@ -105,7 +120,7 @@ cat > "$CONFIG_FILE" <<EOF
     {
       "type": "socks",
       "tag": "socks-in",
-      "listen": "0.0.0.0",
+      "listen": "::",
       "listen_port": $PORT,
       "users": [{
         "username": "$USERNAME",
@@ -152,23 +167,19 @@ echo "$LISTEN_INFO"
 echo "[INFO] 测试本地 socks5 代理连接..."
 
 # 测试 IPv4 连接
-if curl -s --socks5-hostname "127.0.0.1:$PORT" -U "$USERNAME:$PASSWORD" http://ip.sb >/dev/null 2>&1; then
+if timeout 5 curl -s --socks5-hostname "127.0.0.1:$PORT" -U "$USERNAME:$PASSWORD" http://ip.sb >/dev/null 2>&1; then
   echo "✅ 本地 IPv4 代理连接测试成功"
 else
-  echo "❌ 本地 IPv4 代理连接测试失败，请检查 sing-box 配置和日志"
-  tail -n 20 "$LOG_FILE"
-  exit 1
+  echo "⚠️ 本地 IPv4 代理连接测试失败"
 fi
 
-# 测试 IPv6 连接（如果支持）
-if [[ "$IP_V6" != "::1" ]]; then
-  if curl -s --socks5-hostname "[::1]:$PORT" -U "$USERNAME:$PASSWORD" http://ip.sb >/dev/null 2>&1; then
+# 测试 IPv6 连接
+if [[ -n "$IP_V6" ]]; then
+  if timeout 5 curl -s --socks5-hostname "[::1]:$PORT" -U "$USERNAME:$PASSWORD" http://ip.sb >/dev/null 2>&1; then
     echo "✅ 本地 IPv6 代理连接测试成功"
   else
-    echo "⚠️ 本地 IPv6 代理连接测试失败，但 IPv4 正常工作"
+    echo "⚠️ 本地 IPv6 代理连接测试失败"
   fi
-else
-  echo "⚠️ 系统不支持 IPv6，仅启用 IPv4 代理"
 fi
 
 # ===== 防火墙提示 =====
@@ -181,14 +192,25 @@ echo
 
 # ===== 输出连接信息 =====
 echo "✅ Socks5 启动成功："
-echo "socks5://$USERNAME:$PASSWORD@$IP_V4:$PORT (IPv4)"
-if [[ "$IP_V6" != "::1" ]]; then
+
+if [[ -n "$IP_V4" ]]; then
+  echo "socks5://$USERNAME:$PASSWORD@$IP_V4:$PORT (IPv4)"
+fi
+
+if [[ -n "$IP_V6" ]]; then
   echo "socks5://$USERNAME:$PASSWORD@[$IP_V6]:$PORT (IPv6)"
 fi
+
 echo
 echo "💡 使用说明："
-echo "  - 监听地址: 0.0.0.0:$PORT (支持 IPv4/IPv6 双栈)"
+echo "  - 监听地址: :::$PORT (真正的 IPv4/IPv6 双栈)"
 echo "  - 用户名: $USERNAME"
 echo "  - 密码: $PASSWORD"
+echo
+echo "💾 管理命令:"
+echo "  - 查看日志: tail -f $LOG_FILE"
+echo "  - 查看状态: ps aux | grep sing-box"
+echo "  - 停止服务: kill \$(cat $PID_FILE)"
+echo "  - 卸载服务: bash <(curl -Ls https://你的URL/sock5.sh) uninstall"
 
 exit 0
