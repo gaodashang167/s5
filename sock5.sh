@@ -6,6 +6,8 @@ CONFIG_FILE="$INSTALL_DIR/config.json"
 BIN_FILE="$INSTALL_DIR/sing-box"
 SERVICE_NAME="sing-box-socks5.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME"
+OPENRC_SERVICE_NAME="sing-box-socks5"
+OPENRC_SERVICE_FILE="/etc/init.d/$OPENRC_SERVICE_NAME"
 SB_VER="${SB_VER:-v1.12.0}"
 
 log() { printf '[INFO] %s\n' "$*"; }
@@ -15,9 +17,15 @@ die() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 
 if [[ "${1:-}" == "uninstall" ]]; then
   log "停止并删除服务"
-  systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
-  rm -f "$SERVICE_FILE"
-  systemctl daemon-reload
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+    rm -f "$SERVICE_FILE"
+    systemctl daemon-reload
+  elif command -v rc-service >/dev/null 2>&1; then
+    rc-service "$OPENRC_SERVICE_NAME" stop 2>/dev/null || true
+    rc-update del "$OPENRC_SERVICE_NAME" default 2>/dev/null || true
+    rm -f "$OPENRC_SERVICE_FILE"
+  fi
   rm -rf "$INSTALL_DIR"
   printf 'Socks5 已卸载。\n'
   exit 0
@@ -34,9 +42,13 @@ install_dependencies() {
   local missing=()
   local cmd
 
-  for cmd in curl tar python3 systemctl; do
+  for cmd in curl tar python3; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
+
+  if ! command -v systemctl >/dev/null 2>&1 && ! command -v rc-service >/dev/null 2>&1; then
+    missing+=("systemd/OpenRC 服务管理器")
+  fi
 
   (( ${#missing[@]} == 0 )) && return 0
 
@@ -56,9 +68,13 @@ install_dependencies() {
     die "未识别到受支持的包管理器，无法自动安装: ${missing[*]}"
   fi
 
-  for cmd in curl tar python3 systemctl; do
+  for cmd in curl tar python3; do
     command -v "$cmd" >/dev/null 2>&1 || die "依赖自动安装后仍不可用: $cmd"
   done
+
+  if ! command -v systemctl >/dev/null 2>&1 && ! command -v rc-service >/dev/null 2>&1; then
+    die "依赖自动安装后仍不可用: systemd/OpenRC 服务管理器"
+  fi
 }
 
 install_dependencies
@@ -114,6 +130,7 @@ chmod 0600 "$CONFIG_FILE"
 
 "$BIN_FILE" check -c "$CONFIG_FILE" || die "sing-box 配置检查失败"
 
+if command -v systemctl >/dev/null 2>&1; then
 cat >"$SERVICE_FILE" <<'EOF'
 [Unit]
 Description=Sing-box SOCKS5 service
@@ -136,18 +153,46 @@ ReadWritePaths=/usr/local/sb
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME"
-sleep 1
-if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-  systemctl status "$SERVICE_NAME" --no-pager -l || true
-  journalctl -u "$SERVICE_NAME" -n 30 --no-pager || true
-  die "服务启动失败"
+  systemctl daemon-reload
+  systemctl enable --now "$SERVICE_NAME"
+  sleep 1
+  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    systemctl status "$SERVICE_NAME" --no-pager -l || true
+    journalctl -u "$SERVICE_NAME" -n 30 --no-pager || true
+    die "服务启动失败"
+  fi
+  STATUS_COMMAND="systemctl status $SERVICE_NAME"
+  LOG_COMMAND="journalctl -u $SERVICE_NAME -f"
+else
+  cat >"$OPENRC_SERVICE_FILE" <<'EOF'
+#!/sbin/openrc-run
+
+name="sing-box-socks5"
+description="Sing-box SOCKS5 service"
+command="/usr/local/sb/sing-box"
+command_args="run -c /usr/local/sb/config.json"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/sing-box-socks5.log"
+error_log="/var/log/sing-box-socks5.log"
+
+depend() {
+  need net
+  after firewall
+}
+EOF
+  chmod 0755 "$OPENRC_SERVICE_FILE"
+  rc-update add "$OPENRC_SERVICE_NAME" default
+  rc-service "$OPENRC_SERVICE_NAME" restart
+  sleep 1
+  rc-service "$OPENRC_SERVICE_NAME" status >/dev/null 2>&1 || die "服务启动失败"
+  STATUS_COMMAND="rc-service $OPENRC_SERVICE_NAME status"
+  LOG_COMMAND="tail -f /var/log/sing-box-socks5.log"
 fi
 
 printf '\nSocks5 安装成功。\n'
 printf '端口: %s\n用户名: %s\n' "$PORT" "$USERNAME"
 printf '密码已写入 %s，不在终端回显。\n' "$CONFIG_FILE"
-printf '状态: systemctl status %s\n' "$SERVICE_NAME"
-printf '日志: journalctl -u %s -f\n' "$SERVICE_NAME"
+printf '状态: %s\n' "$STATUS_COMMAND"
+printf '日志: %s\n' "$LOG_COMMAND"
 printf '提示: :: 是否同时接受 IPv4 取决于系统 net.ipv6.bindv6only 设置。\n'
