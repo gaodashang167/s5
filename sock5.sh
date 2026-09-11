@@ -30,9 +30,38 @@ fi
 [[ ${#USERNAME} -le 128 ]] || die "USERNAME 不能超过 128 字符"
 [[ ${#PASSWORD} -le 256 ]] || die "PASSWORD 不能超过 256 字符"
 
-for cmd in curl tar python3 systemctl; do
-  command -v "$cmd" >/dev/null 2>&1 || die "缺少依赖: $cmd"
-done
+install_dependencies() {
+  local missing=()
+  local cmd
+
+  for cmd in curl tar python3 systemctl; do
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+  done
+
+  (( ${#missing[@]} == 0 )) && return 0
+
+  log "检测到缺少依赖: ${missing[*]}，正在自动安装..."
+
+  if command -v apk >/dev/null 2>&1; then
+    apk add --no-cache curl tar python3
+  elif command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends curl tar python3 ca-certificates
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y curl tar python3 ca-certificates
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y curl tar python3 ca-certificates
+  else
+    die "未识别到受支持的包管理器，无法自动安装: ${missing[*]}"
+  fi
+
+  for cmd in curl tar python3 systemctl; do
+    command -v "$cmd" >/dev/null 2>&1 || die "依赖自动安装后仍不可用: $cmd"
+  done
+}
+
+install_dependencies
 
 case "$(uname -m)" in
   x86_64) ARCH=amd64 ;;
