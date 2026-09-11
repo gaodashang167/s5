@@ -1,79 +1,130 @@
-# 项目说明
- socks5
+# Socks5 一键安装脚本
 
-## 老王的保活项目
-- 老王[仓库地址](https://github.com/eooce/Sing-box)  
-> 特点：全自动保活
+基于 sing-box 部署带用户名和密码认证的 Socks5 服务，支持 systemd 开机自启及异常自动重启。
 
-----
+## 安装
 
-## VPS版一键无交互脚本Socks5  安装/卸载脚本 (同时支持 IPv4 和 IPv6)
-用法
-### 安装：
-```
-PORT=16805 USERNAME=用户名 PASSWORD=密码 bash <(curl -Ls https://raw.githubusercontent.com/jyucoeng/socks5/main/sock5.sh)
-```
-### 说明：IPv4 使用端口 PORT，IPv6 则使用端口 PORT+1
+请使用 root 用户执行：
 
-### 卸载:
+```bash
+PORT=16805 USERNAME=用户名 PASSWORD=密码 bash <(curl -fLsS https://raw.githubusercontent.com/gaodashang167/s5/main/sock5.sh)
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/jyucoeng/socks5/main/sock5.sh) uninstall
+
+参数说明：
+
+- `PORT`：监听端口，范围为 1 到 65535
+- `USERNAME`：Socks5 用户名
+- `PASSWORD`：Socks5 密码
+
+建议使用 `curl -fLsS`，远程地址返回 404 或其他 HTTP 错误时会直接停止，不会把错误页面交给 bash 执行。
+
+## 卸载
+
+```bash
+bash <(curl -fLsS https://raw.githubusercontent.com/gaodashang167/s5/main/sock5.sh) uninstall
 ```
-查看配置
+
+## 服务管理
+
+查看运行状态：
+
+```bash
+systemctl status sing-box-socks5.service
 ```
+
+查看实时日志：
+
+```bash
+journalctl -u sing-box-socks5.service -f
+```
+
+重启服务：
+
+```bash
+systemctl restart sing-box-socks5.service
+```
+
+停止服务：
+
+```bash
+systemctl stop sing-box-socks5.service
+```
+
+启动服务：
+
+```bash
+systemctl start sing-box-socks5.service
+```
+
+## 配置文件
+
+配置文件位置：
+
+```text
+/usr/local/sb/config.json
+```
+
+查看配置：
+
+```bash
 cat /usr/local/sb/config.json
 ```
-## 测试socks5是否通畅
-运行以下命令，若正确返回服务器ip则节点通畅
-```
-curl ip.sb --socks5 用户名:密码@localhost:端口
-```
-或者
- 打开下方网址验证
 
-https://iplau.com/category/ip-detection-tool.html
+配置文件包含认证密码，请勿公开。
 
-# 🧩 NAT64 一键配置脚本
+## 测试代理
 
-在仅 IPv6 的 VPS 上启用 NAT64，访问 IPv4 网站。
-
----
-
-## ✅ 使用方法
-
-### 1. 设置 DNS64
+在服务器本机测试：
 
 ```bash
-echo -e "nameserver 2606:4700:4700::64\nnameserver 2606:4700:4700::6400" | sudo tee /etc/resolv.conf
-
+curl --socks5-hostname 127.0.0.1:16805 -U '用户名:密码' https://api.ipify.org
 ```
----
 
-### 2. 安装 NAT64 支持
+把端口、用户名和密码替换为安装时设置的值。正确返回出口 IP 即表示代理可用。
+
+## IPv4 和 IPv6
+
+脚本监听 `::`。是否同时接受 IPv4 连接取决于系统的 `net.ipv6.bindv6only` 设置。
+
+查看当前设置：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jyucoeng/socks5/main/nat64-setup.sh)
-
+sysctl net.ipv6.bindv6only
 ```
 
-🔍 验证是否成功
+如果返回 `0`，通常可由同一端口同时接受 IPv4 和 IPv6 连接。如果返回 `1`，该监听通常仅接受 IPv6 连接。
+
+## 防火墙
+
+请在 VPS 防火墙或云平台安全组中放行所设置端口的 TCP 入站流量。
+
+使用 UFW 的示例：
 
 ```bash
-curl -6 http://example.com
-
+ufw allow 16805/tcp
 ```
-能返回网页代码说明成功.
 
-❌ 卸载方法
+使用 iptables 的示例：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jyucoeng/socks5/main/nat64-setup.sh) uninstall
-
+iptables -I INPUT -p tcp --dport 16805 -j ACCEPT
 ```
-📌 说明
-	•	默认 NAT64 地址为 2001:67c:2960:6464::
-	•	默认网卡为 venet0，如不同请自行修改脚本
 
----
+请将示例端口替换为实际的 `PORT`。
 
+## 文件位置
 
+- sing-box：`/usr/local/sb/sing-box`
+- 配置文件：`/usr/local/sb/config.json`
+- systemd 服务：`/etc/systemd/system/sing-box-socks5.service`
+
+## 注意事项
+
+- 脚本必须以 root 用户运行。
+- 不要直接使用来源不明的脚本地址。
+- 安装命令中的仓库地址是 `gaodashang167/s5`，不要使用已经返回 404 的旧地址 `jyucoeng/socks5`。
+- 修改配置后，请先执行配置检查，再重启服务：
+
+```bash
+/usr/local/sb/sing-box check -c /usr/local/sb/config.json && systemctl restart sing-box-socks5.service
+```
