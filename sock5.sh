@@ -190,9 +190,20 @@ EOF
   LOG_COMMAND="tail -f /var/log/sing-box-socks5.log"
 fi
 
+PUBLIC_IP="$(curl -4 -fLsS --connect-timeout 5 --max-time 10 https://api.ipify.org 2>/dev/null || true)"
+
 printf '\nSocks5 安装成功。\n'
 printf '端口: %s\n用户名: %s\n' "$PORT" "$USERNAME"
-printf '密码已写入 %s，不在终端回显。\n' "$CONFIG_FILE"
 printf '状态: %s\n' "$STATUS_COMMAND"
 printf '日志: %s\n' "$LOG_COMMAND"
+
+if [[ -n "$PUBLIC_IP" ]]; then
+  printf '\n完整代理:\n'
+  printf 'socks5://%s:%s@%s:%s\n' "$USERNAME" "$PASSWORD" "$PUBLIC_IP" "$PORT"
+else
+  printf '\n未能自动获取公网 IPv4，请手动使用以下格式：\n'
+  printf 'socks5://%s:%s@服务器IP:%s\n' "$USERNAME" "$PASSWORD" "$PORT"
+fi
+
+printf '\n注意：以上代理链接包含明文密码，请勿公开分享。\n'
 printf '提示: :: 是否同时接受 IPv4 取决于系统 net.ipv6.bindv6only 设置。\n'
