@@ -55,7 +55,7 @@ install_dependencies() {
   log "检测到缺少依赖: ${missing[*]}，正在自动安装..."
 
   if command -v apk >/dev/null 2>&1; then
-    apk add --no-cache curl tar python3
+    apk add --no-cache curl tar python3 openrc
   elif command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
